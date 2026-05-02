@@ -55,18 +55,59 @@ jobs:
 
           mkdir -p downloads tmp_downloads
 
+          # Authenticate gh with the GITHUB_TOKEN
+          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+
           # Download each URL
           for URL in $URLS; do
             FILENAME=$(basename "$URL")
-            echo "⬇️ Downloading $URL -> $FILENAME"
-            aria2c \
-              --header="User-Agent: Mozilla/5.0" \
-              --split=2 \
-              --max-connection-per-server=2 \
-              --min-split-size=90M \
-              --dir="tmp_downloads" \
-              --out="$FILENAME" \
-              "$URL"
+            echo "⬇️ Processing $URL -> $FILENAME"
+
+            # Try to handle as GitHub release asset
+            if [[ $URL =~ github\.com/([^/]+)/([^/]+)/releases/download/([^/]+)/(.+)$ ]]; then
+              OWNER="${BASH_REMATCH[1]}"
+              REPO="${BASH_REMATCH[2]}"
+              TAG="${BASH_REMATCH[3]}"
+              ASSET_NAME="${BASH_REMATCH[4]}"
+
+              echo "🔍 Detected GitHub release asset: $OWNER/$REPO @ $TAG -> $ASSET_NAME"
+
+              # Get asset ID using gh API
+              ASSET_ID=$(gh api repos/$OWNER/$REPO/releases/tags/$TAG \
+                --jq ".assets[] | select(.name==\"$ASSET_NAME\") | .id")
+
+              if [ -n "$ASSET_ID" ]; then
+                echo "✅ Found asset ID: $ASSET_ID, fetching fresh download URL..."
+                # Get fresh download URL (follows redirect)
+                DOWNLOAD_URL=$(gh api repos/$OWNER/$REPO/releases/assets/$ASSET_ID \
+                  --header "Accept: application/octet-stream" \
+                  --jq ".url" 2>/dev/null || echo "")
+                
+                if [ -n "$DOWNLOAD_URL" ]; then
+                  echo "🔄 Downloading with fresh URL..."
+                  wget --header="Accept: application/octet-stream" \
+                       --user-agent="Mozilla/5.0" \
+                       -O "tmp_downloads/$FILENAME" \
+                       "$DOWNLOAD_URL"
+                else
+                  echo "⚠️ Could not get fresh URL, falling back to original with user-agent"
+                  wget --user-agent="Mozilla/5.0" -O "tmp_downloads/$FILENAME" "$URL"
+                fi
+              else
+                echo "⚠️ Asset not found via API, using original URL with user-agent"
+                wget --user-agent="Mozilla/5.0" -O "tmp_downloads/$FILENAME" "$URL"
+              fi
+            else
+              echo "⚠️ Not a GitHub release URL, downloading directly with user-agent"
+              wget --user-agent="Mozilla/5.0" -O "tmp_downloads/$FILENAME" "$URL"
+            fi
+
+            # Check if download succeeded
+            if [ $? -ne 0 ] || [ ! -s "tmp_downloads/$FILENAME" ]; then
+              echo "❌ Download failed for $FILENAME"
+              exit 1
+            fi
+            echo "✅ Downloaded: $FILENAME"
           done
 
           # Zip all downloads if mode is 'zip'
